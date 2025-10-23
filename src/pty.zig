@@ -253,7 +253,7 @@ const PosixPty = struct {
 
 /// Windows PTY creation and management.
 const WindowsPty = struct {
-    pub const Error = OpenError || GetSizeError || SetSizeError;
+    pub const Error = OpenError || GetModeError || GetSizeError || SetSizeError || SetModeError;
 
     pub const Fd = windows.HANDLE;
 
@@ -365,6 +365,51 @@ const WindowsPty = struct {
             &pty.pseudo_console,
         );
         if (result != windows.S_OK) return error.Unexpected;
+        errdefer windows.exp.kernel32.ClosePseudoConsole(pty.pseudo_console);
+
+        // Configure console modes to enable VT100/ANSI support (Phase 1)
+        // This is critical for proper terminal emulation on Windows
+
+        // 1. Configure INPUT mode for the PTY
+        var in_mode: windows.DWORD = 0;
+        if (windows.exp.kernel32.GetConsoleMode(pty.in_pipe_pty, &in_mode) != 0) {
+            // Enable virtual terminal input for ANSI escape sequences
+            in_mode |= windows.exp.ENABLE_VIRTUAL_TERMINAL_INPUT;
+            // Disable echo and line input for raw terminal mode
+            in_mode &= ~@as(windows.DWORD, windows.exp.ENABLE_ECHO_INPUT);
+            in_mode &= ~@as(windows.DWORD, windows.exp.ENABLE_LINE_INPUT);
+            if (windows.exp.kernel32.SetConsoleMode(pty.in_pipe_pty, in_mode) == 0) {
+                log.warn("Failed to set console input mode: {}", .{windows.kernel32.GetLastError()});
+            }
+        } else {
+            log.warn("Failed to get console input mode: {}", .{windows.kernel32.GetLastError()});
+        }
+
+        // 2. Configure OUTPUT mode for the PTY
+        var out_mode: windows.DWORD = 0;
+        if (windows.exp.kernel32.GetConsoleMode(pty.out_pipe_pty, &out_mode) != 0) {
+            // Enable virtual terminal processing for ANSI escape sequences
+            out_mode |= windows.exp.ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            // Disable newline auto-return for proper cursor control
+            out_mode |= windows.exp.DISABLE_NEWLINE_AUTO_RETURN;
+            // Disable wrap at EOL for better control
+            out_mode &= ~@as(windows.DWORD, windows.exp.ENABLE_WRAP_AT_EOL_OUTPUT);
+            if (windows.exp.kernel32.SetConsoleMode(pty.out_pipe_pty, out_mode) == 0) {
+                log.warn("Failed to set console output mode: {}", .{windows.kernel32.GetLastError()});
+            }
+        } else {
+            log.warn("Failed to get console output mode: {}", .{windows.kernel32.GetLastError()});
+        }
+
+        // 3. Configure UTF-8 code page (Phase 2)
+        // This ensures all input/output is properly encoded in UTF-8
+        const CP_UTF8 = 65001;
+        if (windows.exp.kernel32.SetConsoleCP(CP_UTF8) == 0) {
+            log.warn("Failed to set input code page to UTF-8: {}", .{windows.kernel32.GetLastError()});
+        }
+        if (windows.exp.kernel32.SetConsoleOutputCP(CP_UTF8) == 0) {
+            log.warn("Failed to set output code page to UTF-8: {}", .{windows.kernel32.GetLastError()});
+        }
 
         pty.size = size;
         return pty;
@@ -377,6 +422,53 @@ const WindowsPty = struct {
         _ = windows.CloseHandle(self.out_pipe);
         _ = windows.exp.kernel32.ClosePseudoConsole(self.pseudo_console);
         self.* = undefined;
+    }
+
+    pub const GetModeError = error{GetModeFailed};
+
+    /// Get the console mode. On Windows, we query the console input mode
+    /// to determine if echo and line input (canonical mode) are enabled.
+    /// Phase 4: Improved to try multiple handles for better accuracy.
+    pub fn getMode(self: Pty) GetModeError!Mode {
+        var mode: windows.DWORD = 0;
+
+        // Try to get the console mode from the input PTY pipe first
+        if (windows.exp.kernel32.GetConsoleMode(self.in_pipe_pty, &mode) != 0) {
+            return .{
+                .canonical = (mode & windows.exp.ENABLE_LINE_INPUT) != 0,
+                .echo = (mode & windows.exp.ENABLE_ECHO_INPUT) != 0,
+            };
+        }
+
+        // Fallback: try the regular input pipe
+        if (windows.exp.kernel32.GetConsoleMode(self.in_pipe, &mode) != 0) {
+            return .{
+                .canonical = (mode & windows.exp.ENABLE_LINE_INPUT) != 0,
+                .echo = (mode & windows.exp.ENABLE_ECHO_INPUT) != 0,
+            };
+        }
+
+        // Fallback: try output pipes
+        if (windows.exp.kernel32.GetConsoleMode(self.out_pipe_pty, &mode) != 0) {
+            return .{
+                .canonical = (mode & windows.exp.ENABLE_LINE_INPUT) != 0,
+                .echo = (mode & windows.exp.ENABLE_ECHO_INPUT) != 0,
+            };
+        }
+
+        if (windows.exp.kernel32.GetConsoleMode(self.out_pipe, &mode) != 0) {
+            return .{
+                .canonical = (mode & windows.exp.ENABLE_LINE_INPUT) != 0,
+                .echo = (mode & windows.exp.ENABLE_ECHO_INPUT) != 0,
+            };
+        }
+
+        // Last resort: return default values for raw mode
+        // ConPTY typically operates in raw mode
+        return .{
+            .canonical = false,
+            .echo = false,
+        };
     }
 
     pub const GetSizeError = error{};
@@ -397,6 +489,44 @@ const WindowsPty = struct {
 
         if (result != windows.S_OK) return error.ResizeFailed;
         self.size = size;
+    }
+
+    pub const SetModeError = error{SetModeFailed};
+
+    /// Set the console mode. On Windows, this modifies the console input mode
+    /// to control echo and line input (canonical mode).
+    /// Phase 3: Implementation of setMode for dynamic mode changes.
+    pub fn setMode(self: *Pty, mode: Mode) SetModeError!void {
+        var console_mode: windows.DWORD = 0;
+
+        // Try to get current mode from in_pipe_pty first
+        var handle_to_use: windows.HANDLE = self.in_pipe_pty;
+        if (windows.exp.kernel32.GetConsoleMode(handle_to_use, &console_mode) == 0) {
+            // Fallback to in_pipe
+            handle_to_use = self.in_pipe;
+            if (windows.exp.kernel32.GetConsoleMode(handle_to_use, &console_mode) == 0) {
+                return error.SetModeFailed;
+            }
+        }
+
+        // Apply canonical mode (line input)
+        if (mode.canonical) {
+            console_mode |= windows.exp.ENABLE_LINE_INPUT;
+        } else {
+            console_mode &= ~@as(windows.DWORD, windows.exp.ENABLE_LINE_INPUT);
+        }
+
+        // Apply echo mode
+        if (mode.echo) {
+            console_mode |= windows.exp.ENABLE_ECHO_INPUT;
+        } else {
+            console_mode &= ~@as(windows.DWORD, windows.exp.ENABLE_ECHO_INPUT);
+        }
+
+        // Set the new mode
+        if (windows.exp.kernel32.SetConsoleMode(handle_to_use, console_mode) == 0) {
+            return error.SetModeFailed;
+        }
     }
 };
 

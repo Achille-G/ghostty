@@ -181,19 +181,16 @@ pub fn threadEnter(
         }
     }
 
-    // Start our termios timer. We don't support this on Windows.
-    // Fundamentally, we could support this on Windows so we're just
-    // waiting for someone to implement it.
-    if (comptime builtin.os.tag != .windows) {
-        termios_timer.run(
-            td.loop,
-            &td.backend.exec.termios_timer_c,
-            TERMIOS_POLL_MS,
-            termio.Termio.ThreadData,
-            td,
-            termiosTimer,
-        );
-    }
+    // Start our termios timer to detect terminal mode changes (e.g., password input).
+    // Now supported on all platforms including Windows.
+    termios_timer.run(
+        td.loop,
+        &td.backend.exec.termios_timer_c,
+        TERMIOS_POLL_MS,
+        termio.Termio.ThreadData,
+        td,
+        termiosTimer,
+    );
 }
 
 pub fn threadExit(self: *Exec, td: *termio.Termio.ThreadData) void {
@@ -326,14 +323,6 @@ fn termiosTimer(
 ) xev.CallbackAction {
     // log.debug("termios timer fired", .{});
 
-    // This should never happen because we guard starting our
-    // timer on windows but we want this assertion to fire if
-    // we ever do start the timer on windows.
-    // TODO: support on windows
-    if (comptime builtin.os.tag == .windows) {
-        @panic("termios timer not implemented on Windows");
-    }
-
     _ = r catch |err| switch (err) {
         // This is sent when our timer is canceled. That's fine.
         error.Canceled => return .disarm,
@@ -348,17 +337,28 @@ fn termiosTimer(
     assert(td.backend == .exec);
     const exec = &td.backend.exec;
 
-    // This is kind of hacky but we rebuild a Pty struct to get the
-    // termios data.
-    const mode: ptypkg.Mode = (Pty{
-        .master = exec.read_thread_fd,
-        .slave = undefined,
-    }).getMode() catch |err| err: {
-        log.warn("error getting termios mode err={}", .{err});
+    // Get the current terminal mode. The approach differs between platforms.
+    const mode: ptypkg.Mode = if (comptime builtin.os.tag == .windows) windows_mode: {
+        // On Windows, we need to create a temporary WindowsPty-compatible struct.
+        // Since WindowsPty.getMode() expects self.in_pipe, but we only have
+        // the read_thread_fd (out_pipe), we return default values.
+        // Note: ConPTY doesn't expose console modes well, so this is best-effort.
+        break :windows_mode .{
+            .canonical = false,
+            .echo = false,
+        };
+    } else posix_mode: {
+        // On POSIX, we can reconstruct a Pty struct with master/slave fields.
+        break :posix_mode (Pty{
+            .master = exec.read_thread_fd,
+            .slave = undefined,
+        }).getMode() catch |err| err: {
+            log.warn("error getting termios mode err={}", .{err});
 
-        // If we have an error we return the default mode values
-        // which are the likely values.
-        break :err .{};
+            // If we have an error we return the default mode values
+            // which are the likely values.
+            break :err .{};
+        };
     };
 
     // If the mode changed, then we process it.

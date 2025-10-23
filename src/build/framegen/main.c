@@ -1,10 +1,90 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifndef _WIN32
 #include <dirent.h>
+#endif
 #include <sys/stat.h>
 #include <errno.h>
 #include <zlib.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#include <direct.h>
+
+// Windows implementation of dirent structures
+struct dirent {
+    char d_name[MAX_PATH];
+};
+
+// Windows scandir implementation
+static int scandir(const char *dirpath, struct dirent ***namelist,
+                   int (*filter)(const struct dirent *),
+                   int (*compare)(const struct dirent **, const struct dirent **)) {
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind;
+    char search_path[MAX_PATH];
+    int count = 0;
+    int capacity = 32;
+    struct dirent **entries = malloc(capacity * sizeof(struct dirent*));
+
+    if (!entries) return -1;
+
+    snprintf(search_path, sizeof(search_path), "%s\\*", dirpath);
+    hFind = FindFirstFileA(search_path, &find_data);
+
+    if (hFind == INVALID_HANDLE_VALUE) {
+        free(entries);
+        return -1;
+    }
+
+    do {
+        if (strcmp(find_data.cFileName, ".") == 0 || strcmp(find_data.cFileName, "..") == 0) {
+            continue;
+        }
+
+        struct dirent temp;
+        strncpy(temp.d_name, find_data.cFileName, MAX_PATH - 1);
+        temp.d_name[MAX_PATH - 1] = '\0';
+
+        if (filter && !filter(&temp)) {
+            continue;
+        }
+
+        if (count >= capacity) {
+            capacity *= 2;
+            struct dirent **new_entries = realloc(entries, capacity * sizeof(struct dirent*));
+            if (!new_entries) {
+                for (int i = 0; i < count; i++) free(entries[i]);
+                free(entries);
+                FindClose(hFind);
+                return -1;
+            }
+            entries = new_entries;
+        }
+
+        entries[count] = malloc(sizeof(struct dirent));
+        if (!entries[count]) {
+            for (int i = 0; i < count; i++) free(entries[i]);
+            free(entries);
+            FindClose(hFind);
+            return -1;
+        }
+        memcpy(entries[count], &temp, sizeof(struct dirent));
+        count++;
+    } while (FindNextFileA(hFind, &find_data));
+
+    FindClose(hFind);
+
+    if (compare) {
+        qsort(entries, count, sizeof(struct dirent*), (int (*)(const void*, const void*))compare);
+    }
+
+    *namelist = entries;
+    return count;
+}
+#endif
 
 #define SEPARATOR '\x01'
 #define CHUNK_SIZE 16384

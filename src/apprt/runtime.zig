@@ -11,6 +11,10 @@ pub const Runtime = enum {
     /// approach to building the application.
     gtk,
 
+    /// GLFW. Cross-platform windowing with OpenGL support.
+    /// Used for Windows port MVP.
+    glfw,
+
     pub fn default(target: std.Target) Runtime {
         return switch (target.os.tag) {
             // The Linux and FreeBSD default is GTK because it is a full

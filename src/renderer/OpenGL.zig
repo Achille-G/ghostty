@@ -138,11 +138,17 @@ fn prepareContext(getProcAddress: anytype) !void {
     errdefer gl.glad.unload();
     log.info("loaded OpenGL {}.{}", .{ major, minor });
 
-    // Enable debug output for the context.
-    try gl.enable(gl.c.GL_DEBUG_OUTPUT);
+    // Enable debug output for the context if available.
+    gl.enable(gl.c.GL_DEBUG_OUTPUT) catch |err| {
+        log.debug("failed to enable GL_DEBUG_OUTPUT: {}", .{err});
+    };
 
-    // Register our debug message callback with the OpenGL context.
-    gl.glad.context.DebugMessageCallback.?(glDebugMessageCallback, null);
+    // Register our debug message callback with the OpenGL context if available.
+    if (gl.glad.context.DebugMessageCallback) |callback| {
+        callback(glDebugMessageCallback, null);
+    } else {
+        log.debug("GL debug message callback not available", .{});
+    }
 
     // Enable SRGB framebuffer for linear blending support.
     try gl.enable(gl.c.GL_FRAMEBUFFER_SRGB);
@@ -165,8 +171,9 @@ pub fn surfaceInit(surface: *apprt.Surface) !void {
     switch (apprt.runtime) {
         else => @compileError("unsupported app runtime for OpenGL"),
 
-        // GTK uses global OpenGL context so we load from null.
+        // GTK and GLFW use global OpenGL context so we load from null.
         apprt.gtk,
+        apprt.glfw,
         => try prepareContext(null),
 
         apprt.embedded => {
@@ -208,6 +215,11 @@ pub fn threadEnter(self: *const OpenGL, surface: *apprt.Surface) !void {
             // on the main thread. As such, we don't do anything here.
         },
 
+        apprt.glfw => {
+            // GLFW requires drawing on the main thread, similar to GTK
+            // so we don't do anything here.
+        },
+
         apprt.embedded => {
             // TODO(mitchellh): this does nothing today to allow libghostty
             // to compile for OpenGL targets but libghostty is strictly
@@ -223,8 +235,10 @@ pub fn threadExit(self: *const OpenGL) void {
     switch (apprt.runtime) {
         else => @compileError("unsupported app runtime for OpenGL"),
 
-        apprt.gtk => {
-            // We don't need to do any unloading for GTK because we may
+        apprt.gtk,
+        apprt.glfw,
+        => {
+            // We don't need to do any unloading for GTK/GLFW because we may
             // be sharing the global bindings with other windows.
         },
 

@@ -4086,6 +4086,7 @@ pub fn finalize(self: *Config) !void {
                     .true,
             }
         },
+        .glfw => {},
     }
 
     // If we have the special value "inherit" then set it to null which

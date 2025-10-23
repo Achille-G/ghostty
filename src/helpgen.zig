@@ -11,8 +11,15 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     const alloc = gpa.allocator();
 
-    var buf: [4096]u8 = undefined;
-    var stdout = std.fs.File.stdout().writer(&buf);
+    // On Windows, allocate large buffer on heap to avoid stack overflow
+    // On other platforms, use 4KB stack buffer
+    const is_windows = @import("builtin").os.tag == .windows;
+    var stack_buf: [4096]u8 = undefined;
+    const heap_buf = if (is_windows) try alloc.alloc(u8, 1024 * 1024) else &[_]u8{};
+    defer if (is_windows) alloc.free(heap_buf);
+
+    const buf = if (is_windows) heap_buf else &stack_buf;
+    var stdout = std.fs.File.stdout().writer(buf);
     const writer = &stdout.interface;
     try writer.writeAll(
         \\// THIS FILE IS AUTO GENERATED
@@ -23,7 +30,12 @@ pub fn main() !void {
     try genConfig(alloc, writer);
     try genActions(alloc, writer);
     try genKeybindActions(alloc, writer);
-    try stdout.end();
+    // Flush buffered writer (ignore ftruncate error on Windows)
+    stdout.end() catch |err| {
+        if (is_windows and err == error.FileTooBig) {
+            // On Windows, ftruncate() on stdout fails, but buffer is flushed
+        } else return err;
+    };
 }
 
 fn genConfig(alloc: std.mem.Allocator, writer: *std.Io.Writer) !void {

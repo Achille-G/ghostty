@@ -546,6 +546,7 @@ pub fn add(
         switch (self.config.app_runtime) {
             .none => {},
             .gtk => try self.addGtkNg(step),
+            .glfw => try self.addGlfw(step),
         }
     }
 
@@ -690,6 +691,81 @@ fn addGtkNg(
         step.addCSourceFile(.{ .file = dist.resources_c.path(b), .flags = &.{} });
         step.addIncludePath(dist.resources_h.path(b).dirname());
     }
+}
+
+/// Setup the dependencies for the GLFW apprt build.
+fn addGlfw(
+    self: *const SharedDeps,
+    step: *std.Build.Step.Compile,
+) !void {
+    const b = step.step.owner;
+    _ = self;
+
+    // Create GLFW module and add it to imports
+    const glfw_module = b.createModule(.{
+        .root_source_file = b.path("pkg/glfw/main.zig"),
+    });
+    step.root_module.addImport("glfw", glfw_module);
+
+    // Add GLFW include path
+    step.addIncludePath(b.path("pkg/glfw/include/"));
+
+    // Common GLFW source files (cross-platform)
+    const common_sources = [_][]const u8{
+        "pkg/glfw/src/context.c",
+        "pkg/glfw/src/init.c",
+        "pkg/glfw/src/input.c",
+        "pkg/glfw/src/monitor.c",
+        "pkg/glfw/src/platform.c",
+        "pkg/glfw/src/vulkan.c",
+        "pkg/glfw/src/window.c",
+        "pkg/glfw/src/egl_context.c",
+        "pkg/glfw/src/osmesa_context.c",
+        "pkg/glfw/src/null_init.c",
+        "pkg/glfw/src/null_monitor.c",
+        "pkg/glfw/src/null_window.c",
+        "pkg/glfw/src/null_joystick.c",
+    };
+
+    // Windows-specific GLFW source files
+    const win32_sources = [_][]const u8{
+        "pkg/glfw/src/win32_init.c",
+        "pkg/glfw/src/win32_joystick.c",
+        "pkg/glfw/src/win32_module.c",
+        "pkg/glfw/src/win32_monitor.c",
+        "pkg/glfw/src/win32_thread.c",
+        "pkg/glfw/src/win32_time.c",
+        "pkg/glfw/src/win32_window.c",
+        "pkg/glfw/src/wgl_context.c",
+    };
+
+    // Compiler flags for GLFW
+    const cflags = [_][]const u8{
+        "-D_GLFW_WIN32", // Platform define for Windows
+        "-DUNICODE",     // Use Unicode Windows API
+        "-D_UNICODE",
+    };
+
+    // Add common source files
+    for (common_sources) |source| {
+        step.addCSourceFile(.{
+            .file = b.path(source),
+            .flags = &cflags,
+        });
+    }
+
+    // Add Windows-specific source files
+    for (win32_sources) |source| {
+        step.addCSourceFile(.{
+            .file = b.path(source),
+            .flags = &cflags,
+        });
+    }
+
+    // Link Windows system libraries
+    step.linkSystemLibrary2("gdi32", dynamic_link_opts);
+    step.linkSystemLibrary2("user32", dynamic_link_opts);
+    step.linkSystemLibrary2("shell32", dynamic_link_opts);
 }
 
 /// Add only the dependencies required for `Config.simd` enabled. This also

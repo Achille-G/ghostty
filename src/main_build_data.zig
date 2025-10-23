@@ -33,9 +33,16 @@ pub fn main() !void {
     const action = action_ orelse return error.NoAction;
 
     // Our output always goes to stdout.
-    var buffer: [1024]u8 = undefined;
-    var stdout_writer = std.fs.File.stdout().writer(&buffer);
-    const writer = &stdout_writer.interface;
+    // On Windows, use heap-allocated buffer to avoid stack overflow
+    // On other platforms, use 1KB stack buffer
+    const is_windows = @import("builtin").os.tag == .windows;
+    var stack_buf: [1024]u8 = undefined;
+    const heap_buf = if (is_windows) try alloc.alloc(u8, 1024 * 1024) else &[_]u8{};
+    defer if (is_windows) alloc.free(heap_buf);
+
+    const buf = if (is_windows) heap_buf else &stack_buf;
+    var stdout = std.fs.File.stdout().writer(buf);
+    const writer = &stdout.interface;
     switch (action) {
         .bash => try writer.writeAll(@import("extra/bash.zig").completions),
         .fish => try writer.writeAll(@import("extra/fish.zig").completions),
@@ -47,5 +54,10 @@ pub fn main() !void {
         .@"vim-compiler" => try writer.writeAll(@import("extra/vim.zig").compiler),
         .terminfo => try @import("terminfo/ghostty.zig").ghostty.encode(writer),
     }
-    try stdout_writer.end();
+    // Flush buffered writer (ignore ftruncate error on Windows)
+    stdout.end() catch |err| {
+        if (is_windows and err == error.FileTooBig) {
+            // On Windows, ftruncate() on stdout fails, but buffer is flushed
+        } else return err;
+    };
 }

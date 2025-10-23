@@ -97,14 +97,18 @@ pub fn draw1CD00_1CDE5(
     // that this is static data that is embedded in the binary.
     const octants_len = octant_max - octant_min + 1;
     const octants: [octants_len]Octant = comptime octants: {
-        @setEvalBranchQuota(10_000);
+        // Higher quota needed for trim() on Windows with CRLF line endings
+        @setEvalBranchQuota(20_000);
 
         var result: [octants_len]Octant = @splat(.{});
         var i: usize = 0;
 
         const data = @embedFile("octants.txt");
         var it = std.mem.splitScalar(u8, data, '\n');
-        while (it.next()) |line| {
+        while (it.next()) |line_raw| {
+            // Trim whitespace/control chars (handles CRLF on Windows)
+            const line = std.mem.trim(u8, line_raw, &std.ascii.whitespace);
+
             // Skip comments
             if (line.len == 0 or line[0] == '#') continue;
 

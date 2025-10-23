@@ -53,22 +53,22 @@ pub const exp = struct {
             hWritePipe: *windows.HANDLE,
             lpPipeAttributes: ?*const windows.SECURITY_ATTRIBUTES,
             nSize: windows.DWORD,
-        ) callconv(windows.WINAPI) windows.BOOL;
+        ) callconv(.winapi) windows.BOOL;
         pub extern "kernel32" fn CreatePseudoConsole(
             size: windows.COORD,
             hInput: windows.HANDLE,
             hOutput: windows.HANDLE,
             dwFlags: windows.DWORD,
             phPC: *HPCON,
-        ) callconv(windows.WINAPI) windows.HRESULT;
-        pub extern "kernel32" fn ResizePseudoConsole(hPC: HPCON, size: windows.COORD) callconv(windows.WINAPI) windows.HRESULT;
-        pub extern "kernel32" fn ClosePseudoConsole(hPC: HPCON) callconv(windows.WINAPI) void;
+        ) callconv(.winapi) windows.HRESULT;
+        pub extern "kernel32" fn ResizePseudoConsole(hPC: HPCON, size: windows.COORD) callconv(.winapi) windows.HRESULT;
+        pub extern "kernel32" fn ClosePseudoConsole(hPC: HPCON) callconv(.winapi) void;
         pub extern "kernel32" fn InitializeProcThreadAttributeList(
             lpAttributeList: LPPROC_THREAD_ATTRIBUTE_LIST,
             dwAttributeCount: windows.DWORD,
             dwFlags: windows.DWORD,
             lpSize: *windows.SIZE_T,
-        ) callconv(windows.WINAPI) windows.BOOL;
+        ) callconv(.winapi) windows.BOOL;
         pub extern "kernel32" fn UpdateProcThreadAttribute(
             lpAttributeList: LPPROC_THREAD_ATTRIBUTE_LIST,
             dwFlags: windows.DWORD,
@@ -77,7 +77,7 @@ pub const exp = struct {
             cbSize: windows.SIZE_T,
             lpPreviousValue: ?windows.PVOID,
             lpReturnSize: ?*windows.SIZE_T,
-        ) callconv(windows.WINAPI) windows.BOOL;
+        ) callconv(.winapi) windows.BOOL;
         pub extern "kernel32" fn PeekNamedPipe(
             hNamedPipe: windows.HANDLE,
             lpBuffer: ?windows.LPVOID,
@@ -85,7 +85,7 @@ pub const exp = struct {
             lpBytesRead: ?*windows.DWORD,
             lpTotalBytesAvail: ?*windows.DWORD,
             lpBytesLeftThisMessage: ?*windows.DWORD,
-        ) callconv(windows.WINAPI) windows.BOOL;
+        ) callconv(.winapi) windows.BOOL;
         // Duplicated here because lpCommandLine is not marked optional in zig std
         pub extern "kernel32" fn CreateProcessW(
             lpApplicationName: ?windows.LPWSTR,
@@ -98,13 +98,39 @@ pub const exp = struct {
             lpCurrentDirectory: ?windows.LPWSTR,
             lpStartupInfo: *windows.STARTUPINFOW,
             lpProcessInformation: *windows.PROCESS_INFORMATION,
-        ) callconv(windows.WINAPI) windows.BOOL;
+        ) callconv(.winapi) windows.BOOL;
+        pub extern "kernel32" fn GetConsoleMode(
+            hConsoleHandle: windows.HANDLE,
+            lpMode: *windows.DWORD,
+        ) callconv(.winapi) windows.BOOL;
+        pub extern "kernel32" fn SetConsoleMode(
+            hConsoleHandle: windows.HANDLE,
+            dwMode: windows.DWORD,
+        ) callconv(.winapi) windows.BOOL;
+        pub extern "kernel32" fn SetConsoleCP(
+            wCodePageID: windows.UINT,
+        ) callconv(.winapi) windows.BOOL;
+        pub extern "kernel32" fn SetConsoleOutputCP(
+            wCodePageID: windows.UINT,
+        ) callconv(.winapi) windows.BOOL;
     };
 
     pub const PROC_THREAD_ATTRIBUTE_NUMBER = 0x0000FFFF;
     pub const PROC_THREAD_ATTRIBUTE_THREAD = 0x00010000;
     pub const PROC_THREAD_ATTRIBUTE_INPUT = 0x00020000;
     pub const PROC_THREAD_ATTRIBUTE_ADDITIVE = 0x00040000;
+
+    // Console mode flags - Input
+    pub const ENABLE_PROCESSED_INPUT = 0x0001;
+    pub const ENABLE_LINE_INPUT = 0x0002;
+    pub const ENABLE_ECHO_INPUT = 0x0004;
+    pub const ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200;
+
+    // Console mode flags - Output
+    pub const ENABLE_PROCESSED_OUTPUT = 0x0001;
+    pub const ENABLE_WRAP_AT_EOL_OUTPUT = 0x0002;
+    pub const ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004;
+    pub const DISABLE_NEWLINE_AUTO_RETURN = 0x0008;
 
     pub const ProcThreadAttributeNumber = enum(windows.DWORD) {
         ProcThreadAttributePseudoConsole = 22,
