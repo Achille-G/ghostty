@@ -83,8 +83,12 @@ pub fn init(self: *Self, app: *ApprtApp, opts: Options) !void {
 
     // Setup GLFW callbacks
     _ = glfw.setWindowCloseCallback(window, windowCloseCallback);
+    _ = glfw.setWindowFocusCallback(window, windowFocusCallback);
     _ = glfw.setKeyCallback(window, keyCallback);
     _ = glfw.setCharCallback(window, charCallback);
+    _ = glfw.setMouseButtonCallback(window, mouseButtonCallback);
+    _ = glfw.setCursorPosCallback(window, cursorPosCallback);
+    _ = glfw.setCursorEnterCallback(window, cursorEnterCallback);
     _ = glfw.setFramebufferSizeCallback(window, framebufferSizeCallback);
     _ = glfw.setScrollCallback(window, scrollCallback);
 
@@ -204,12 +208,35 @@ pub fn clipboardRequest(
     clipboard_type: apprt.Clipboard,
     state: apprt.ClipboardRequest,
 ) !void {
-    _ = clipboard_type;
-    _ = state;
-    _ = self;
+    log.info("clipboardRequest called: type={}, state={}", .{ clipboard_type, state });
 
-    // TODO: Implement clipboard request via GLFW
-    log.debug("clipboardRequest not yet implemented", .{});
+    // Windows only supports standard clipboard
+    if (clipboard_type != .standard) {
+        log.debug("Unsupported clipboard type on Windows: {}", .{clipboard_type});
+        return;
+    }
+
+    // Get clipboard contents from GLFW
+    const clipboard_cstr = glfw.getClipboardString(self.glfw_window);
+
+    // Convert C string to Zig slice
+    const clipboard_text = std.mem.span(clipboard_cstr);
+
+    log.info("Clipboard content retrieved: length={}, content={s}", .{ clipboard_text.len, clipboard_text });
+
+    // Handle paste confirmation if needed
+    // For now, we directly complete the request without confirmation
+    // GTK has complex logic for unsafe paste detection, we keep it simple
+    self.core_surface.completeClipboardRequest(
+        state,
+        clipboard_text,
+        false, // confirm=false, no confirmation dialog
+    ) catch |err| {
+        log.warn("Failed to complete clipboard request: {}", .{err});
+        return err;
+    };
+
+    log.info("Clipboard request completed successfully", .{});
 }
 
 pub fn setClipboardString(
@@ -218,17 +245,19 @@ pub fn setClipboardString(
     clipboard_type: apprt.Clipboard,
     confirm: bool,
 ) !void {
-    _ = self;
     _ = confirm;
 
+    log.info("setClipboardString called: type={}, length={}, content={s}", .{ clipboard_type, val.len, val });
+
     if (clipboard_type != .standard) {
+        log.debug("Non-standard clipboard type, ignoring", .{});
         return; // Only standard clipboard on Windows
     }
 
-    // Set clipboard via GLFW
-    glfw.setClipboardString(null, val.ptr);
+    // Set clipboard via GLFW using the current window
+    glfw.setClipboardString(self.glfw_window, val.ptr);
 
-    log.debug("Clipboard set: {s}", .{val});
+    log.info("Clipboard set successfully", .{});
 }
 
 pub fn defaultTermioEnv(self: *Self) !std.process.EnvMap {
@@ -319,11 +348,15 @@ fn keyCallback(
     // Convert GLFW key to input.Key (simplified mapping)
     const input_key = glfwKeyToInputKey(key);
 
+    // Get the unshifted codepoint for letter keys (needed for keybindings)
+    const unshifted_codepoint: u21 = glfwKeyToUnshiftedCodepoint(key);
+
     // Create key event
     const event: @import("../../input.zig").KeyEvent = .{
         .action = input_action,
         .key = input_key,
         .mods = input_mods,
+        .unshifted_codepoint = unshifted_codepoint,
     };
 
     // Send to core surface
@@ -415,6 +448,116 @@ fn scrollCallback(
     };
 }
 
+fn windowFocusCallback(
+    window: ?*glfw.Window,
+    focused: c_int,
+) callconv(.c) void {
+    const self = getSurfaceFromWindow(window) orelse return;
+    const is_focused = focused == glfw.TRUE;
+
+    log.debug("Window focus: {}", .{is_focused});
+
+    // Notify core surface of focus change
+    self.core_surface.focusCallback(is_focused) catch |err| {
+        log.warn("error in focus callback err={}", .{err});
+    };
+}
+
+fn mouseButtonCallback(
+    window: ?*glfw.Window,
+    button: c_int,
+    action: c_int,
+    mods: c_int,
+) callconv(.c) void {
+    const self = getSurfaceFromWindow(window) orelse return;
+
+    // Convert GLFW button to input.MouseButton
+    const input_button: @import("../../input.zig").MouseButton = switch (button) {
+        glfw.MOUSE_BUTTON_LEFT => .left,
+        glfw.MOUSE_BUTTON_RIGHT => .right,
+        glfw.MOUSE_BUTTON_MIDDLE => .middle,
+        else => .left, // Fallback for extra buttons
+    };
+
+    // Convert GLFW action to input.MouseButtonState
+    const input_button_state: @import("../../input.zig").MouseButtonState = switch (action) {
+        glfw.PRESS => .press,
+        glfw.RELEASE => .release,
+        else => return,
+    };
+
+    // Convert GLFW mods to input.Mods
+    const input_mods: @import("../../input.zig").Mods = .{
+        .shift = (mods & glfw.MOD_SHIFT) != 0,
+        .ctrl = (mods & glfw.MOD_CONTROL) != 0,
+        .alt = (mods & glfw.MOD_ALT) != 0,
+        .super = (mods & glfw.MOD_SUPER) != 0,
+    };
+
+    log.debug("Mouse button: button={}, state={}, mods={}", .{ input_button, input_button_state, input_mods });
+
+    // Send to core surface (returns bool indicating if event was consumed)
+    _ = self.core_surface.mouseButtonCallback(
+        input_button_state,
+        input_button,
+        input_mods,
+    ) catch |err| {
+        log.warn("error in mouse button callback err={}", .{err});
+        return;
+    };
+}
+
+fn cursorPosCallback(
+    window: ?*glfw.Window,
+    xpos: f64,
+    ypos: f64,
+) callconv(.c) void {
+    const self = getSurfaceFromWindow(window) orelse return;
+
+    // Update stored cursor position
+    self.cursor_pos = .{
+        .x = @as(f32, @floatCast(xpos)),
+        .y = @as(f32, @floatCast(ypos)),
+    };
+
+    // Get current modifiers (GLFW doesn't provide them in cursor pos callback)
+    // We'll pass empty mods for now - ideally we'd track them
+    const mods: @import("../../input.zig").Mods = .{
+        .shift = false,
+        .ctrl = false,
+        .alt = false,
+        .super = false,
+    };
+
+    // Send to core surface
+    self.core_surface.cursorPosCallback(self.cursor_pos, mods) catch |err| {
+        log.warn("error in cursor pos callback err={}", .{err});
+    };
+}
+
+fn cursorEnterCallback(
+    window: ?*glfw.Window,
+    entered: c_int,
+) callconv(.c) void {
+    const self = getSurfaceFromWindow(window) orelse return;
+
+    if (entered == glfw.FALSE) {
+        // Mouse left the window - send (-1, -1) like GTK does
+        self.cursor_pos = .{ .x = -1, .y = -1 };
+
+        const mods: @import("../../input.zig").Mods = .{
+            .shift = false,
+            .ctrl = false,
+            .alt = false,
+            .super = false,
+        };
+
+        self.core_surface.cursorPosCallback(self.cursor_pos, mods) catch |err| {
+            log.warn("error in cursor enter callback err={}", .{err});
+        };
+    }
+}
+
 fn getSurfaceFromWindow(window: ?*glfw.Window) ?*Self {
     const win = window orelse return null;
     const ptr = glfw.getWindowUserPointer(win) orelse return null;
@@ -460,5 +603,50 @@ fn glfwKeyToInputKey(key: c_int) @import("../../input.zig").Key {
         glfw.KEY_LEFT => input.Key.arrow_left,
         glfw.KEY_RIGHT => input.Key.arrow_right,
         else => input.Key.unidentified,
+    };
+}
+
+fn glfwKeyToUnshiftedCodepoint(key: c_int) u21 {
+    // Return the lowercase/unshifted character for letter keys
+    // This is needed for keybindings that use Unicode characters
+    return switch (key) {
+        glfw.KEY_A => 'a',
+        glfw.KEY_B => 'b',
+        glfw.KEY_C => 'c',
+        glfw.KEY_D => 'd',
+        glfw.KEY_E => 'e',
+        glfw.KEY_F => 'f',
+        glfw.KEY_G => 'g',
+        glfw.KEY_H => 'h',
+        glfw.KEY_I => 'i',
+        glfw.KEY_J => 'j',
+        glfw.KEY_K => 'k',
+        glfw.KEY_L => 'l',
+        glfw.KEY_M => 'm',
+        glfw.KEY_N => 'n',
+        glfw.KEY_O => 'o',
+        glfw.KEY_P => 'p',
+        glfw.KEY_Q => 'q',
+        glfw.KEY_R => 'r',
+        glfw.KEY_S => 's',
+        glfw.KEY_T => 't',
+        glfw.KEY_U => 'u',
+        glfw.KEY_V => 'v',
+        glfw.KEY_W => 'w',
+        glfw.KEY_X => 'x',
+        glfw.KEY_Y => 'y',
+        glfw.KEY_Z => 'z',
+        glfw.KEY_SPACE => ' ',
+        glfw.KEY_0 => '0',
+        glfw.KEY_1 => '1',
+        glfw.KEY_2 => '2',
+        glfw.KEY_3 => '3',
+        glfw.KEY_4 => '4',
+        glfw.KEY_5 => '5',
+        glfw.KEY_6 => '6',
+        glfw.KEY_7 => '7',
+        glfw.KEY_8 => '8',
+        glfw.KEY_9 => '9',
+        else => 0,
     };
 }
